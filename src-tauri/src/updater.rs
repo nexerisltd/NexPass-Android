@@ -13,7 +13,7 @@ use std::io::Write;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
-const CURRENT_VERSION: &str = "5.0.2";
+const CURRENT_VERSION: &str = "5.0.5";
 const HTTP_TIMEOUT_SECS: u64 = 15;
 
 // Replace with wherever you end up hosting update.json (a GitHub raw

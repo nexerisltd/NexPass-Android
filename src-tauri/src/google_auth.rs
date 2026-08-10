@@ -17,20 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
-fn google_client_id() -> Result<&'static str, String> {
-    option_env!("GOOGLE_CLIENT_ID")
-        .ok_or_else(|| "missing build-time environment variable GOOGLE_CLIENT_ID".to_string())
-}
-
-fn google_client_secret() -> Result<&'static str, String> {
-    option_env!("GOOGLE_CLIENT_SECRET")
-        .ok_or_else(|| "missing build-time environment variable GOOGLE_CLIENT_SECRET".to_string())
-}
-
-fn firebase_api_key() -> Result<&'static str, String> {
-    option_env!("FIREBASE_API_KEY")
-        .ok_or_else(|| "missing build-time environment variable FIREBASE_API_KEY".to_string())
-}
+use crate::secrets::{GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, FIREBASE_API_KEY};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FirebaseSession {
@@ -50,10 +37,9 @@ pub fn sign_in_with_google(app: &AppHandle) -> Result<FirebaseSession, String> {
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}");
 
-    let google_client_id = google_client_id()?;
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&access_type=offline&prompt=consent",
-        google_client_id, redirect_uri
+        GOOGLE_CLIENT_ID, redirect_uri
     );
 
     app.opener()
@@ -109,15 +95,13 @@ fn exchange_code_for_google_tokens(
     code: &str,
     redirect_uri: &str,
 ) -> Result<GoogleTokenResponse, String> {
-    let google_client_id = google_client_id()?;
-    let google_client_secret = google_client_secret()?;
     let client = reqwest::blocking::Client::new();
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
             ("code", code),
-            ("client_id", &google_client_id),
-            ("client_secret", &google_client_secret),
+            ("client_id", GOOGLE_CLIENT_ID),
+            ("client_secret", GOOGLE_CLIENT_SECRET),
             ("redirect_uri", redirect_uri),
             ("grant_type", "authorization_code"),
         ])
@@ -151,10 +135,9 @@ fn exchange_id_token_for_firebase_session(
     google_id_token: &str,
 ) -> Result<FirebaseSession, String> {
     let client = reqwest::blocking::Client::new();
-    let firebase_api_key = firebase_api_key()?;
     let url = format!(
         "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={}",
-        firebase_api_key
+        FIREBASE_API_KEY
     );
 
     let post_body = format!("id_token={google_id_token}&providerId=google.com");

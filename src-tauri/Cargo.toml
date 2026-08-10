@@ -1,6 +1,6 @@
 [package]
 name = "nexpass"
-version = "5.0.2"
+version = "5.0.5"
 description = "NexPass — secure local credential vault"
 authors = ["Arabi Islam, MR. ARX <NexApp>"]
 edition = "2021"
@@ -9,7 +9,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2" }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"

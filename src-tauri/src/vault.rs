@@ -32,6 +32,7 @@ fn open_db(app: &AppHandle) -> Result<Connection, String> {
             username_ct TEXT, username_nonce TEXT,
             password_ct TEXT NOT NULL, password_nonce TEXT NOT NULL,
             url_ct TEXT, url_nonce TEXT,
+            fields_ct TEXT, fields_nonce TEXT,
             notes_ct TEXT, notes_nonce TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -56,6 +57,14 @@ fn open_db(app: &AppHandle) -> Result<Connection, String> {
     // Migration for categories (v5.0.2) — existing entries default to "login".
     let _ = conn.execute("ALTER TABLE entries ADD COLUMN category TEXT NOT NULL DEFAULT 'login'", []);
 
+    // Migration for category-specific fields (v5.0.6) — an encrypted JSON
+    // blob holding whatever fields that entry's category needs (card
+    // number, API key, keystore alias, etc). Opaque to the backend; the
+    // frontend owns the schema per category. Login keeps using the
+    // classic username/password/url/notes columns instead.
+    let _ = conn.execute("ALTER TABLE entries ADD COLUMN fields_ct TEXT", []);
+    let _ = conn.execute("ALTER TABLE entries ADD COLUMN fields_nonce TEXT", []);
+
     Ok(conn)
 }
 
@@ -75,6 +84,8 @@ pub struct EntryInput {
     pub notes: String,
     #[serde(default = "default_category")]
     pub category: String,
+    #[serde(default)]
+    pub fields_json: Option<String>,
 }
 
 pub fn default_category() -> String {
@@ -103,6 +114,7 @@ pub struct EntryFull {
     pub updated_at: i64,
     pub favorite: bool,
     pub category: String,
+    pub fields_json: Option<String>,
 }
 
 fn enc(text: &str, key: &VaultKey) -> Result<EncryptedPayload, String> {
@@ -127,6 +139,26 @@ fn dec_opt(ct: Option<String>, nonce: Option<String>, key: &VaultKey) -> Result<
     }
 }
 
+// Like dec_opt, but for a value that's genuinely optional (returns None
+// rather than an empty string when there's nothing stored) — used for
+// fields_json, which shouldn't exist at all for Login-category entries.
+fn dec_opt_none(ct: Option<String>, nonce: Option<String>, key: &VaultKey) -> Result<Option<String>, String> {
+    match (ct, nonce) {
+        (Some(c), Some(n)) => Ok(Some(dec(&c, &n, key)?)),
+        _ => Ok(None),
+    }
+}
+
+fn enc_opt(value: &Option<String>, key: &VaultKey) -> Result<(Option<String>, Option<String>), String> {
+    match value {
+        Some(v) => {
+            let e = enc(v, key)?;
+            Ok((Some(e.ciphertext_b64), Some(e.nonce_b64)))
+        }
+        None => Ok((None, None)),
+    }
+}
+
 pub fn add_entry(app: &AppHandle, key: &VaultKey, input: EntryInput) -> Result<String, String> {
     let conn = open_db(app)?;
     let id = Uuid::new_v4().to_string();
@@ -137,12 +169,13 @@ pub fn add_entry(app: &AppHandle, key: &VaultKey, input: EntryInput) -> Result<S
     let password = enc(&input.password, key)?;
     let url = enc(&input.url, key)?;
     let notes = enc(&input.notes, key)?;
+    let (fields_ct, fields_nonce) = enc_opt(&input.fields_json, key)?;
 
     conn.execute(
         "INSERT INTO entries (id, title_ct, title_nonce, username_ct, username_nonce,
             password_ct, password_nonce, url_ct, url_nonce, notes_ct, notes_nonce,
-            created_at, updated_at, category)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            created_at, updated_at, category, fields_ct, fields_nonce)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             id,
             title.ciphertext_b64,
@@ -157,7 +190,9 @@ pub fn add_entry(app: &AppHandle, key: &VaultKey, input: EntryInput) -> Result<S
             notes.nonce_b64,
             now,
             now,
-            input.category
+            input.category,
+            fields_ct,
+            fields_nonce
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -241,7 +276,8 @@ pub fn get_entry(app: &AppHandle, key: &VaultKey, id: &str) -> Result<EntryFull,
     let mut stmt = conn
         .prepare(
             "SELECT title_ct, title_nonce, username_ct, username_nonce, password_ct, password_nonce,
-                    url_ct, url_nonce, notes_ct, notes_nonce, updated_at, favorite, category
+                    url_ct, url_nonce, notes_ct, notes_nonce, updated_at, favorite, category,
+                    fields_ct, fields_nonce
              FROM entries WHERE id = ?1",
         )
         .map_err(|e| e.to_string())?;
@@ -262,6 +298,8 @@ pub fn get_entry(app: &AppHandle, key: &VaultKey, id: &str) -> Result<EntryFull,
                 row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
                 row.get::<_, String>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })
         .map_err(|_| "entry not found".to_string())?;
@@ -280,6 +318,8 @@ pub fn get_entry(app: &AppHandle, key: &VaultKey, id: &str) -> Result<EntryFull,
         updated_at,
         favorite,
         category,
+        fields_ct,
+        fields_nonce,
     ) = row;
 
     Ok(EntryFull {
@@ -292,6 +332,7 @@ pub fn get_entry(app: &AppHandle, key: &VaultKey, id: &str) -> Result<EntryFull,
         updated_at,
         favorite: favorite != 0,
         category,
+        fields_json: dec_opt_none(fields_ct, fields_nonce, key)?,
     })
 }
 
@@ -309,12 +350,14 @@ pub fn update_entry(
     let password = enc(&input.password, key)?;
     let url = enc(&input.url, key)?;
     let notes = enc(&input.notes, key)?;
+    let (fields_ct, fields_nonce) = enc_opt(&input.fields_json, key)?;
 
     let affected = conn
         .execute(
             "UPDATE entries SET title_ct=?1, title_nonce=?2, username_ct=?3, username_nonce=?4,
                 password_ct=?5, password_nonce=?6, url_ct=?7, url_nonce=?8,
-                notes_ct=?9, notes_nonce=?10, updated_at=?11, synced_at=NULL, category=?12 WHERE id=?13",
+                notes_ct=?9, notes_nonce=?10, updated_at=?11, synced_at=NULL, category=?12,
+                fields_ct=?13, fields_nonce=?14 WHERE id=?15",
             params![
                 title.ciphertext_b64,
                 title.nonce_b64,
@@ -328,6 +371,8 @@ pub fn update_entry(
                 notes.nonce_b64,
                 now,
                 input.category,
+                fields_ct,
+                fields_nonce,
                 id
             ],
         )
@@ -426,6 +471,10 @@ pub struct RawEntry {
     pub synced_at: Option<i64>,
     #[serde(default = "default_category")]
     pub category: String,
+    #[serde(default)]
+    pub fields_ct: Option<String>,
+    #[serde(default)]
+    pub fields_nonce: Option<String>,
 }
 
 pub fn export_all(app: &AppHandle, key: &VaultKey) -> Result<Vec<EntryFull>, String> {
@@ -445,6 +494,7 @@ pub fn export_all(app: &AppHandle, key: &VaultKey) -> Result<Vec<EntryFull>, Str
             updated_at: r.updated_at,
             favorite: r.favorite,
             category: r.category.clone(),
+            fields_json: dec_opt_none(r.fields_ct, r.fields_nonce, key)?,
         });
     }
     Ok(out)
@@ -478,7 +528,7 @@ fn list_entries_raw_where(app: &AppHandle, where_clause: &str) -> Result<Vec<Raw
     let sql = format!(
         "SELECT id, title_ct, title_nonce, username_ct, username_nonce, password_ct,
                 password_nonce, url_ct, url_nonce, notes_ct, notes_nonce, created_at, updated_at,
-                favorite, deleted_at, synced_at, category
+                favorite, deleted_at, synced_at, category, fields_ct, fields_nonce
          FROM entries WHERE {where_clause}"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -503,6 +553,8 @@ fn list_entries_raw_where(app: &AppHandle, where_clause: &str) -> Result<Vec<Raw
                 deleted_at: row.get(14)?,
                 synced_at: row.get(15)?,
                 category: row.get(16)?,
+                fields_ct: row.get(17)?,
+                fields_nonce: row.get(18)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -557,8 +609,8 @@ pub fn upsert_raw_entry_if_newer(app: &AppHandle, entry: &RawEntry) -> Result<bo
     conn.execute(
         "INSERT INTO entries (id, title_ct, title_nonce, username_ct, username_nonce,
             password_ct, password_nonce, url_ct, url_nonce, notes_ct, notes_nonce,
-            created_at, updated_at, favorite, deleted_at, synced_at, category)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?13,?16)
+            created_at, updated_at, favorite, deleted_at, synced_at, category, fields_ct, fields_nonce)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?13,?16,?17,?18)
          ON CONFLICT(id) DO UPDATE SET
             title_ct=excluded.title_ct, title_nonce=excluded.title_nonce,
             username_ct=excluded.username_ct, username_nonce=excluded.username_nonce,
@@ -566,7 +618,8 @@ pub fn upsert_raw_entry_if_newer(app: &AppHandle, entry: &RawEntry) -> Result<bo
             url_ct=excluded.url_ct, url_nonce=excluded.url_nonce,
             notes_ct=excluded.notes_ct, notes_nonce=excluded.notes_nonce,
             updated_at=excluded.updated_at, favorite=excluded.favorite,
-            deleted_at=excluded.deleted_at, synced_at=excluded.updated_at, category=excluded.category",
+            deleted_at=excluded.deleted_at, synced_at=excluded.updated_at, category=excluded.category,
+            fields_ct=excluded.fields_ct, fields_nonce=excluded.fields_nonce",
         params![
             entry.id,
             entry.title_ct,
@@ -583,7 +636,9 @@ pub fn upsert_raw_entry_if_newer(app: &AppHandle, entry: &RawEntry) -> Result<bo
             entry.updated_at,
             entry.favorite as i64,
             entry.deleted_at,
-            entry.category
+            entry.category,
+            entry.fields_ct,
+            entry.fields_nonce
         ],
     )
     .map_err(|e| e.to_string())?;

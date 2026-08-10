@@ -501,6 +501,23 @@ input, textarea, select, button { font-family: inherit; }
 .release-note-date { font-size: 0.72rem; color: var(--text-faint); }
 .release-note-text { margin: 0; font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; white-space: pre-wrap; }
 
+.reveal-all-btn { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; align-self: flex-start; }
+
+.codes-editor { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.codes-editor-row { display: flex; align-items: center; gap: 8px; }
+.codes-editor-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--accent1); }
+.codes-editor-input {
+  flex: 1; padding: 10px 12px; border-radius: 10px; background: var(--glass-bg);
+  border: 1px solid var(--glass-border); color: var(--text); font-size: 0.85rem; outline: none;
+  font-family: ui-monospace, monospace;
+}
+
+.codes-summary { font-size: 0.78rem; color: var(--text-dim); margin-bottom: 8px; }
+.codes-view-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.codes-view-list li { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; }
+.codes-view-list li.used { opacity: 0.45; text-decoration: line-through; }
+.codes-view-code { font-family: ui-monospace, monospace; letter-spacing: 0.03em; }
+
 /* ---------- Small phones ---------- */
 @media (max-width: 360px) {
   .brand-name { font-size: 1.05rem; }

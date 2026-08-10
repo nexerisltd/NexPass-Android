@@ -3,6 +3,7 @@ mod biometric_store;
 mod crypto;
 mod google_auth;
 mod profile_store;
+mod secrets;
 mod settings;
 mod storage;
 mod sync;
@@ -463,6 +464,8 @@ struct ImportedEntry {
     notes: String,
     #[serde(default = "vault::default_category")]
     category: String,
+    #[serde(default)]
+    fields_json: Option<String>,
 }
 
 /// Imports entries from a file produced by export_vault.
@@ -482,7 +485,7 @@ fn import_vault(app: AppHandle, session: State<Session>, file_content: String, p
     let mut count = 0;
     for e in entries {
         vault::add_entry(&app, key, vault::EntryInput {
-            title: e.title, username: e.username, password: e.password, url: e.url, notes: e.notes, category: e.category,
+            title: e.title, username: e.username, password: e.password, url: e.url, notes: e.notes, category: e.category, fields_json: e.fields_json,
         })?;
         count += 1;
     }

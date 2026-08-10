@@ -26,6 +26,9 @@ function friendlyError(raw: string): string {
   ) {
     return "Couldn't reach the server — check your internet connection and try again.";
   }
+  if (s.includes("error decoding response body") || s.includes("invalid type") || s.includes("missing field")) {
+    return "The update/release info couldn't be read — it may be temporarily misformatted. Try again later.";
+  }
   if (raw.length > 140) {
     return "Something went wrong. Please try again.";
   }
@@ -33,7 +36,7 @@ function friendlyError(raw: string): string {
 }
 
 const APP_NAME = "NexPass";
-const APP_VERSION = "5.0.2";
+const APP_VERSION = "5.0.5";
 const APP_ID = "068691";
 const APP_AUTHOR = "NexApp";
 const APP_AUTHOR_URL = "https://nexappog.vercel.app/";
@@ -53,7 +56,7 @@ const UPDATE_FREQUENCY_MS: Record<string, number> = {
 };
 
 type Screen = "loading" | "create-pin" | "confirm-pin" | "enter-pin" | "vault";
-type PanelMode = "none" | "view" | "edit" | "add" | "profile";
+type PanelMode = "none" | "view" | "edit" | "add" | "profile" | "pick-category";
 type MainTab = "home" | "favorites" | "categories" | "settings";
 type SettingsScreen = "menu" | "general" | "account" | "about" | "trash" | "updates";
 type SortMode = "recent" | "name";
@@ -107,6 +110,7 @@ interface EntrySummary {
 interface EntryFull extends EntrySummary {
   password: string;
   notes: string;
+  fields_json: string | null;
 }
 
 interface EntryFormState {
@@ -154,6 +158,109 @@ const CATEGORIES: { id: string; label: string }[] = [
 ];
 function categoryLabel(id: string): string {
   return CATEGORIES.find((c) => c.id === id)?.label ?? "Login";
+}
+
+interface FieldDef {
+  key: string;
+  label: string;
+  type: "text" | "password" | "select" | "textarea" | "date";
+  sensitive?: boolean;
+  options?: string[];
+}
+
+// Login isn't listed here — it keeps using the classic username/password/
+// url/notes columns. Every other category's fields live in the encrypted
+// fields_json blob, rendered generically from this schema.
+const CATEGORY_FIELD_SCHEMAS: Record<string, FieldDef[]> = {
+  card: [
+    { key: "cardholder_name", label: "Cardholder Name", type: "text" },
+    { key: "card_number", label: "Card Number / PAN", type: "password", sensitive: true },
+    { key: "expiry_date", label: "Expiry Date (MM/YY)", type: "text" },
+    { key: "cvv", label: "CVV / CVC", type: "password", sensitive: true },
+    { key: "card_type", label: "Card Type", type: "select", options: ["Visa", "Mastercard", "American Express", "Discover", "Other"] },
+    { key: "card_tier", label: "Card Tier", type: "text" },
+    { key: "bank", label: "Bank", type: "text" },
+    { key: "currency", label: "Currency", type: "text" },
+    { key: "billing_country", label: "Billing Country", type: "text" },
+  ],
+  mobile_banking: [
+    { key: "provider", label: "Provider", type: "select", options: ["bKash", "Nagad", "PayPal", "Rocket", "Other"] },
+    { key: "account_number", label: "Account / Wallet Number", type: "text" },
+    { key: "account_holder_name", label: "Account Holder Name", type: "text" },
+    { key: "account_type", label: "Account Type", type: "select", options: ["Personal", "Merchant"] },
+    { key: "country", label: "Country", type: "text" },
+    { key: "currency", label: "Currency", type: "text" },
+    { key: "account_status", label: "Account Status", type: "select", options: ["Active", "Inactive", "Suspended"] },
+    { key: "notes", label: "Notes", type: "textarea" },
+  ],
+  api_key: [
+    { key: "name", label: "Name", type: "text" },
+    { key: "provider", label: "Provider", type: "text" },
+    { key: "environment", label: "Environment", type: "select", options: ["Development", "Staging", "Production"] },
+    { key: "api_key", label: "API Key", type: "password", sensitive: true },
+    { key: "base_url", label: "Base URL", type: "text" },
+    { key: "expires", label: "Expires", type: "date" },
+    { key: "tags", label: "Tags", type: "text" },
+  ],
+  keystore: [
+    { key: "alias", label: "Alias", type: "text" },
+    { key: "password", label: "Password", type: "password", sensitive: true },
+    { key: "package_id", label: "Package ID", type: "text" },
+    { key: "first_name", label: "First Name", type: "text" },
+    { key: "last_name", label: "Last Name", type: "text" },
+    { key: "organizational_unit", label: "Organizational Unit", type: "text" },
+    { key: "organization", label: "Organization", type: "text" },
+    { key: "city", label: "City", type: "text" },
+    { key: "province", label: "Province", type: "text" },
+    { key: "country", label: "Country", type: "text" },
+  ],
+  oauth_client: [
+    { key: "client_name", label: "Client Name", type: "text" },
+    { key: "provider", label: "Provider", type: "text" },
+    { key: "client_id", label: "Client ID", type: "text" },
+    { key: "client_secret", label: "Client Secret", type: "password", sensitive: true },
+    { key: "client_type", label: "Client Type", type: "select", options: ["Confidential", "Public"] },
+    { key: "environment", label: "Environment", type: "select", options: ["Development", "Staging", "Production"] },
+  ],
+  zip: [
+    { key: "zip_name", label: "Zip Name", type: "text" },
+    { key: "password", label: "Password", type: "password", sensitive: true },
+    { key: "device", label: "Device", type: "text" },
+    { key: "path", label: "Path", type: "text" },
+    { key: "notes", label: "Notes", type: "textarea" },
+  ],
+  backup_codes: [
+    { key: "name", label: "Name", type: "text" },
+    { key: "provider", label: "Provider", type: "text" },
+    { key: "account", label: "Account", type: "text" },
+    { key: "generated_date", label: "Generated Date", type: "date" },
+    // "codes" is handled by a dedicated widget, not this generic renderer.
+  ],
+};
+
+interface BackupCode {
+  code: string;
+  used: boolean;
+}
+
+function parseFieldsJson(raw: string | null): { fields: Record<string, string>; codes: BackupCode[] } {
+  if (!raw) return { fields: {}, codes: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const codes: BackupCode[] = Array.isArray(parsed.codes) ? parsed.codes : [];
+    const fields: Record<string, string> = { ...parsed };
+    delete fields.codes;
+    return { fields, codes };
+  } catch {
+    return { fields: {}, codes: [] };
+  }
+}
+
+function buildFieldsJson(fields: Record<string, string>, codes: BackupCode[]): string | null {
+  const hasFields = Object.values(fields).some((v) => v && v.trim() !== "");
+  const hasCodes = codes.length > 0;
+  if (!hasFields && !hasCodes) return null;
+  return JSON.stringify({ ...fields, ...(hasCodes ? { codes } : {}) });
 }
 
 const emptyForm: EntryFormState = { title: "", username: "", password: "", url: "", notes: "", category: "login" };
@@ -433,7 +540,10 @@ function App() {
   const [viewingTrash, setViewingTrash] = useState(false);
   const [panelMode, setPanelMode] = useState<PanelMode>("none");
   const [form, setForm] = useState<EntryFormState>(emptyForm);
+  const [formFields, setFormFields] = useState<Record<string, string>>({});
+  const [formCodes, setFormCodes] = useState<BackupCode[]>([]);
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [sensitiveRevealed, setSensitiveRevealed] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [brokenIcons, setBrokenIcons] = useState<Set<string>>(new Set());
   function markIconBroken(url: string) {
@@ -752,7 +862,11 @@ function App() {
       // Hands the downloaded APK to Android's own package installer.
       // The system's "Install this update?" confirmation is unavoidable
       // by OS design — this is as close to one-tap as sideloading gets.
-      await openPath(localPath);
+      // Fire-and-forget: launching the install intent can hand focus to
+      // the OS installer without ever resolving this promise, so we
+      // don't block the UI waiting on it — that's what caused the
+      // "stuck on Opening installer…" freeze.
+      openPath(localPath).catch(() => {});
       setUpdateInfo(null);
     } catch (e) {
       showToast(friendlyError(String(e)), "error", 4000);
@@ -765,6 +879,7 @@ function App() {
   async function selectEntry(id: string, fromTrash = false) {
     setSelectedId(id);
     setPasswordVisible(false);
+    setSensitiveRevealed(false);
     setViewingTrash(fromTrash);
     try {
       const entry = await invoke<EntryFull>("get_entry", { id });
@@ -777,9 +892,16 @@ function App() {
 
   function startAdd() {
     setForm(emptyForm);
+    setFormFields({});
+    setFormCodes([]);
     setSelectedId(null);
     setSelectedEntry(null);
     setViewingTrash(false);
+    setPanelMode("pick-category");
+  }
+
+  function pickCategoryAndAdd(categoryId: string) {
+    setForm((f) => ({ ...f, category: categoryId }));
     setPanelMode("add");
   }
 
@@ -793,6 +915,9 @@ function App() {
       notes: selectedEntry.notes,
       category: selectedEntry.category,
     });
+    const parsed = parseFieldsJson(selectedEntry.fields_json);
+    setFormFields(parsed.fields);
+    setFormCodes(parsed.codes);
     setPanelMode("edit");
   }
 
@@ -868,13 +993,14 @@ function App() {
       return;
     }
     const wasEdit = panelMode === "edit" && !!selectedId;
+    const input = { ...form, fields_json: buildFieldsJson(formFields, formCodes) };
     try {
       if (wasEdit && selectedId) {
-        await invoke("update_entry", { id: selectedId, input: form });
+        await invoke("update_entry", { id: selectedId, input });
         loadAll();
         selectEntry(selectedId);
       } else {
-        const id = await invoke<string>("add_entry", { input: form });
+        const id = await invoke<string>("add_entry", { input });
         loadAll();
         selectEntry(id);
       }
@@ -1253,6 +1379,10 @@ function App() {
         }
         if (panelMode === "view" || panelMode === "add") {
           closePanel();
+          return;
+        }
+        if (panelMode === "pick-category") {
+          setPanelMode("none");
           return;
         }
         if (panelMode === "profile") {
@@ -2037,41 +2167,97 @@ function App() {
                 </div>
 
                 <div className="field-block">
-                  <label>Username / Email</label>
-                  <div className="field-row">
-                    <span>{selectedEntry.username || "—"}</span>
-                    {selectedEntry.username && (
-                      <button className="icon-btn" onClick={() => copyToClipboard(selectedEntry.username, "Username")}><Icon.copy /></button>
-                    )}
-                  </div>
+                  <label>Category</label>
+                  <span>{categoryLabel(selectedEntry.category)}</span>
                 </div>
 
-                <div className="field-block">
-                  <label>Password</label>
-                  <div className="field-row">
-                    <span className="password-field">
-                      {passwordVisible ? selectedEntry.password : "•".repeat(Math.max(8, selectedEntry.password.length))}
-                    </span>
-                    <button className="icon-btn" onClick={() => setPasswordVisible((v) => !v)}><Icon.eye /></button>
-                    <button className="icon-btn" onClick={() => copyToClipboard(selectedEntry.password, "Password")}><Icon.copy /></button>
-                  </div>
-                </div>
-
-                {selectedEntry.url && (
-                  <div className="field-block">
-                    <label>Website</label>
-                    <div className="field-row">
-                      <button className="url-link" onClick={() => openExternal(selectedEntry.url)}>{selectedEntry.url}</button>
-                      <button className="icon-btn" onClick={() => openExternal(selectedEntry.url)} title="Open in browser"><Icon.external /></button>
+                {selectedEntry.category === "login" ? (
+                  <>
+                    <div className="field-block">
+                      <label>Username / Email</label>
+                      <div className="field-row">
+                        <span>{selectedEntry.username || "—"}</span>
+                        {selectedEntry.username && (
+                          <button className="icon-btn" onClick={() => copyToClipboard(selectedEntry.username, "Username")}><Icon.copy /></button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
 
-                {selectedEntry.notes && (
-                  <div className="field-block">
-                    <label>Notes</label>
-                    <p className="notes-text">{selectedEntry.notes}</p>
-                  </div>
+                    <div className="field-block">
+                      <label>Password</label>
+                      <div className="field-row">
+                        <span className="password-field">
+                          {passwordVisible ? selectedEntry.password : "•".repeat(Math.max(8, selectedEntry.password.length))}
+                        </span>
+                        <button className="icon-btn" onClick={() => setPasswordVisible((v) => !v)}><Icon.eye /></button>
+                        <button className="icon-btn" onClick={() => copyToClipboard(selectedEntry.password, "Password")}><Icon.copy /></button>
+                      </div>
+                    </div>
+
+                    {selectedEntry.url && (
+                      <div className="field-block">
+                        <label>Website</label>
+                        <div className="field-row">
+                          <button className="url-link" onClick={() => openExternal(selectedEntry.url)}>{selectedEntry.url}</button>
+                          <button className="icon-btn" onClick={() => openExternal(selectedEntry.url)} title="Open in browser"><Icon.external /></button>
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedEntry.notes && (
+                      <div className="field-block">
+                        <label>Notes</label>
+                        <p className="notes-text">{selectedEntry.notes}</p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  (() => {
+                    const { fields, codes } = parseFieldsJson(selectedEntry.fields_json);
+                    const schema = CATEGORY_FIELD_SCHEMAS[selectedEntry.category] ?? [];
+                    const hasSensitive = schema.some((f) => f.sensitive);
+                    return (
+                      <>
+                        {hasSensitive && (
+                          <button className="pill-btn reveal-all-btn" onClick={() => setSensitiveRevealed((v) => !v)}>
+                            <Icon.eye /> {sensitiveRevealed ? "Hide sensitive fields" : "Show sensitive fields"}
+                          </button>
+                        )}
+                        {schema.map((f) => {
+                          const value = fields[f.key];
+                          if (!value) return null;
+                          const masked = f.sensitive && !sensitiveRevealed;
+                          return (
+                            <div className="field-block" key={f.key}>
+                              <label>{f.label}</label>
+                              <div className="field-row">
+                                <span className={f.sensitive ? "password-field" : ""}>
+                                  {masked ? "•".repeat(Math.max(8, value.length)) : value}
+                                </span>
+                                <button className="icon-btn" onClick={() => copyToClipboard(value, f.label)}><Icon.copy /></button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {selectedEntry.category === "backup_codes" && codes.length > 0 && (
+                          <div className="field-block">
+                            <label>Codes</label>
+                            <div className="codes-summary">
+                              Total: {codes.length} · Used: {codes.filter((c) => c.used).length} · Unused: {codes.filter((c) => !c.used).length}
+                            </div>
+                            <ul className="codes-view-list">
+                              {codes.map((c, i) => (
+                                <li key={i} className={c.used ? "used" : ""}>
+                                  <span>{c.used ? "☑" : "☐"}</span>
+                                  <span className="codes-view-code">{c.code}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()
                 )}
 
                 <div className="field-block">
@@ -2083,36 +2269,130 @@ function App() {
           )}
 
           {/* ---------- FULL-PAGE ADD / EDIT ---------- */}
+          {panelMode === "pick-category" && (
+            <div className="fullpage">
+              <div className="screen-header">
+                <button className="icon-btn back-btn" onClick={() => setPanelMode("none")}><Icon.back /></button>
+                <h2>Choose a category</h2>
+              </div>
+              <div className="list-scroll">
+                <div className="category-grid">
+                  {CATEGORIES.map((c) => (
+                    <button key={c.id} className="category-tile" onClick={() => pickCategoryAndAdd(c.id)}>
+                      <span className="category-tile-label">{c.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           {(panelMode === "edit" || panelMode === "add") && (
             <div className="fullpage">
               <div className="screen-header">
                 <button className="icon-btn back-btn" onClick={cancelPanel}><Icon.back /></button>
-                <h2>{panelMode === "edit" ? "Edit item" : "New item"}</h2>
+                <h2>{panelMode === "edit" ? "Edit item" : `New ${categoryLabel(form.category)}`}</h2>
               </div>
               <div className="list-scroll">
                 <form className="entry-form" onSubmit={(e) => { e.preventDefault(); saveForm(); }}>
                   <label className="form-label">Title
                     <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Gmail" autoFocus />
                   </label>
-                  <label className="form-label">Category
-                    <select className="settings-select full" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-                      {CATEGORIES.map((c) => (
-                        <option key={c.id} value={c.id}>{c.label}</option>
+                  {panelMode === "edit" && (
+                    <label className="form-label">Category
+                      <select className="settings-select full" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                        {CATEGORIES.map((c) => (
+                          <option key={c.id} value={c.id}>{c.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+
+                  {form.category === "login" ? (
+                    <>
+                      <label className="form-label">Username / Email
+                        <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+                      </label>
+                      <label className="form-label">Password
+                        <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+                      </label>
+                      <label className="form-label">Website
+                        <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://" />
+                      </label>
+                      <label className="form-label">Notes
+                        <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      {(CATEGORY_FIELD_SCHEMAS[form.category] ?? []).map((f) => (
+                        <label className="form-label" key={f.key}>
+                          {f.label}
+                          {f.type === "select" ? (
+                            <select
+                              className="settings-select full"
+                              value={formFields[f.key] ?? ""}
+                              onChange={(e) => setFormFields({ ...formFields, [f.key]: e.target.value })}
+                            >
+                              <option value="">—</option>
+                              {(f.options ?? []).map((o) => (
+                                <option key={o} value={o}>{o}</option>
+                              ))}
+                            </select>
+                          ) : f.type === "textarea" ? (
+                            <textarea
+                              rows={3}
+                              value={formFields[f.key] ?? ""}
+                              onChange={(e) => setFormFields({ ...formFields, [f.key]: e.target.value })}
+                            />
+                          ) : (
+                            <input
+                              type={f.type === "password" ? "password" : f.type === "date" ? "date" : "text"}
+                              value={formFields[f.key] ?? ""}
+                              onChange={(e) => setFormFields({ ...formFields, [f.key]: e.target.value })}
+                            />
+                          )}
+                        </label>
                       ))}
-                    </select>
-                  </label>
-                  <label className="form-label">Username / Email
-                    <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-                  </label>
-                  <label className="form-label">Password
-                    <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-                  </label>
-                  <label className="form-label">Website
-                    <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://" />
-                  </label>
-                  <label className="form-label">Notes
-                    <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-                  </label>
+                      {form.category === "backup_codes" && (
+                        <div className="form-label">
+                          Codes
+                          <div className="codes-editor">
+                            {formCodes.map((c, i) => (
+                              <div className="codes-editor-row" key={i}>
+                                <input
+                                  type="checkbox"
+                                  checked={c.used}
+                                  onChange={(e) => {
+                                    const next = [...formCodes];
+                                    next[i] = { ...next[i], used: e.target.checked };
+                                    setFormCodes(next);
+                                  }}
+                                />
+                                <input
+                                  className="codes-editor-input"
+                                  value={c.code}
+                                  placeholder="e.g. 4821 7392"
+                                  onChange={(e) => {
+                                    const next = [...formCodes];
+                                    next[i] = { ...next[i], code: e.target.value };
+                                    setFormCodes(next);
+                                  }}
+                                />
+                                <button type="button" className="icon-btn danger" onClick={() => setFormCodes(formCodes.filter((_, j) => j !== i))}>
+                                  <Icon.close />
+                                </button>
+                              </div>
+                            ))}
+                            <button type="button" className="pill-btn" onClick={() => setFormCodes([...formCodes, { code: "", used: false }])}>
+                              <Icon.plus /> Add code
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
                   <div className="form-actions">
                     <button type="button" onClick={cancelPanel}>Cancel</button>
                     <button type="submit" className="primary-btn">Save</button>

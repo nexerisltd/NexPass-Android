@@ -9,7 +9,8 @@ src-tauri/gen/
 keystore.properties
 *.jks
 *.keystore
-*.env
+.env
 
 # Build output zips / installers accidentally sitting in the project root
 *.zip
+src-tauri/src/secrets.rs

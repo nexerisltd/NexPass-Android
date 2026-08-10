@@ -1,7 +1,7 @@
 {
   "name": "nexpass",
   "private": true,
-  "version": "5.0.2",
+  "version": "5.0.5",
   "author": "NexApp",
   "type": "module",
   "scripts": {
