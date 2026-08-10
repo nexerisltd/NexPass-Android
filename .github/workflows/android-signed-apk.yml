@@ -51,11 +51,10 @@ jobs:
           mkdir -p src-tauri/gen/android
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > src-tauri/gen/android/nexpass-release.jks
           cat > src-tauri/gen/android/keystore.properties <<'EOF'
-storeFile=nexpass-release.jks
-storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-EOF
+          storeFile=nexpass-release.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}EOF
 
       - name: Build signed APK
         env:
