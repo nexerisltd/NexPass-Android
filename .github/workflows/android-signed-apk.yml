@@ -41,24 +41,20 @@ jobs:
         run: |
           mkdir -p src-tauri
           cat > src-tauri/.env <<'EOF'
-GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
-GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
-FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
-EOF
+          GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
+          EOF
 
       - name: Write Android signing files
         run: |
           mkdir -p src-tauri/gen/android
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > src-tauri/gen/android/nexpass-release.jks
           cat > src-tauri/gen/android/keystore.properties <<'EOF'
-storeFile=nexpass-release.jks
-storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-EOF
-
-      - name: Build signed APK
-        env:
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+          storeFile=nexpass-release.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
           JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
         run: npx tauri android build --apk
