@@ -471,6 +471,7 @@ input, textarea, select, button { font-family: inherit; }
 .update-changelog { font-size: 0.86rem; color: var(--text-dim); line-height: 1.5; margin: 0 0 16px; white-space: pre-wrap; }
 .update-box .settings-btn-group { width: 100%; }
 .update-box .settings-btn { flex: 1; justify-content: center; }
+.update-progress-block { width: 100%; display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
 
 .category-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .category-tile {

@@ -151,6 +151,7 @@ pub fn run() {
             check_for_update,
             fetch_release_notes,
             download_update,
+            delete_downloaded_apk,
             get_profile,
             save_profile,
             set_profile_avatar,
@@ -555,6 +556,11 @@ fn fetch_release_notes() -> Result<Vec<updater::ReleaseNote>, String> {
 #[tauri::command]
 fn download_update(app: AppHandle, url: String) -> Result<String, String> {
     updater::download_update(&app, &url)
+}
+
+#[tauri::command]
+fn delete_downloaded_apk(app: AppHandle) -> Result<bool, String> {
+    updater::delete_downloaded_apk(&app)
 }
 
 #[tauri::command]

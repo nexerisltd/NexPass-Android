@@ -516,7 +516,9 @@ function App() {
   const [dailySync, setDailySync] = useState<DailySyncPref>(loadDailySyncPref);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateStage, setUpdateStage] = useState<"idle" | "downloading" | "launching">("idle");
+  const [updateStage, setUpdateStage] = useState<"idle" | "downloading" | "ready" | "launching">("idle");
+  const [downloadProgress, setDownloadProgress] = useState<{ downloaded: number; total: number } | null>(null);
+  const [downloadedApkPath, setDownloadedApkPath] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile>({ name: null, bio: null, avatar_path: null });
   const [profileNameDraft, setProfileNameDraft] = useState("");
   const [profileBioDraft, setProfileBioDraft] = useState("");
@@ -613,6 +615,15 @@ function App() {
       if (event.payload.phase === "done" || event.payload.phase === "error") {
         setTimeout(() => setSyncProgress(null), 1200);
       }
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlistenPromise = listen<{ downloaded: number; total: number }>("update-download-progress", (event) => {
+      setDownloadProgress(event.payload);
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -851,28 +862,50 @@ function App() {
     }
   }
 
-  async function handleInstallUpdate() {
+  async function handleDownloadUpdate() {
     if (!updateInfo) return;
     setUpdateBusy(true);
     setUpdateStage("downloading");
+    setDownloadProgress({ downloaded: 0, total: 0 });
     try {
       const localPath = await invoke<string>("download_update", { url: updateInfo.download_url });
-      setUpdateStage("launching");
-      localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: updateInfo.version, appliedAt: Date.now() }));
-      // Hands the downloaded APK to Android's own package installer.
-      // The system's "Install this update?" confirmation is unavoidable
-      // by OS design — this is as close to one-tap as sideloading gets.
-      // Fire-and-forget: launching the install intent can hand focus to
-      // the OS installer without ever resolving this promise, so we
-      // don't block the UI waiting on it — that's what caused the
-      // "stuck on Opening installer…" freeze.
-      openPath(localPath).catch(() => {});
-      setUpdateInfo(null);
+      setDownloadedApkPath(localPath);
+      setUpdateStage("ready");
     } catch (e) {
       showToast(friendlyError(String(e)), "error", 4000);
+      setUpdateStage("idle");
     } finally {
       setUpdateBusy(false);
-      setUpdateStage("idle");
+    }
+  }
+
+  function handleRunInstall() {
+    if (!downloadedApkPath || !updateInfo) return;
+    setUpdateStage("launching");
+    localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: updateInfo.version, appliedAt: Date.now() }));
+    // Hands the downloaded APK to Android's own package installer. If
+    // this app isn't yet allowed to install unknown apps, Android shows
+    // its own "Allow from this source" permission screen as part of the
+    // same flow — that's OS-level and outside anything we control.
+    // Fire-and-forget: the install intent can hand focus to the OS
+    // installer without ever resolving this promise, so we don't block
+    // the UI waiting on it.
+    openPath(downloadedApkPath).catch(() => {});
+    setUpdateInfo(null);
+    setUpdateStage("idle");
+    setDownloadProgress(null);
+    // After a successful install, Android's own installer screen offers
+    // an "Open" button to relaunch — that's as close to an automatic
+    // restart as a sideloaded app gets; we can't force it from here.
+  }
+
+  async function handleDeleteDownloadedApk() {
+    try {
+      const deleted = await invoke<boolean>("delete_downloaded_apk");
+      setDownloadedApkPath(null);
+      showToast(deleted ? "Downloaded update file deleted" : "No downloaded update file to delete", "success");
+    } catch (e) {
+      showToast(friendlyError(String(e)), "error");
     }
   }
 
@@ -2072,11 +2105,18 @@ function App() {
                       {updateInfo && (
                         <div className="settings-row column">
                           <div className="settings-row-title">Update available — v{updateInfo.version}</div>
-                          <button className="settings-btn primary" onClick={handleInstallUpdate} disabled={updateBusy}>
-                            {updateBusy ? (updateStage === "downloading" ? "Downloading…" : "Opening installer…") : "Update Now"}
+                          <button className="settings-btn primary" onClick={() => { if (updateStage === "ready") handleRunInstall(); else handleDownloadUpdate(); }} disabled={updateBusy}>
+                            {updateStage === "downloading" ? "Downloading…" : updateStage === "ready" ? "Install" : "Update Now"}
                           </button>
                         </div>
                       )}
+                      <div className="settings-row">
+                        <div>
+                          <div className="settings-row-title">Downloaded update file</div>
+                          <div className="settings-row-sub">Free up storage after installing.</div>
+                        </div>
+                        <button className="settings-btn" onClick={handleDeleteDownloadedApk}>Delete APK file</button>
+                      </div>
                     </div>
                   </div>
                 </>
@@ -2522,12 +2562,34 @@ function App() {
               v{updateInfo.current_version} <Icon.chevron /> v{updateInfo.version}
             </div>
             <p className="update-changelog">{updateInfo.changelog}</p>
-            {updateBusy ? (
-              <p className="status-text">{updateStage === "downloading" ? "Downloading update…" : "Opening installer…"}</p>
-            ) : (
+
+            {updateStage === "downloading" && (
+              <div className="update-progress-block">
+                <div className="sync-progress-bar">
+                  <div
+                    className="sync-progress-fill"
+                    style={{ width: downloadProgress && downloadProgress.total > 0 ? `${Math.min(100, (downloadProgress.downloaded / downloadProgress.total) * 100)}%` : "8%" }}
+                  />
+                </div>
+                <p className="status-text">
+                  {downloadProgress && downloadProgress.total > 0
+                    ? `Downloading… ${Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}% (${(downloadProgress.downloaded / 1048576).toFixed(1)} / ${(downloadProgress.total / 1048576).toFixed(1)} MB)`
+                    : "Downloading…"}
+                </p>
+              </div>
+            )}
+
+            {updateStage === "ready" && (
               <div className="settings-btn-group">
                 <button className="settings-btn" onClick={dismissUpdate}>Later</button>
-                <button className="settings-btn primary" onClick={handleInstallUpdate}>Update Now</button>
+                <button className="settings-btn primary" onClick={handleRunInstall}>Install</button>
+              </div>
+            )}
+
+            {updateStage === "idle" && (
+              <div className="settings-btn-group">
+                <button className="settings-btn" onClick={dismissUpdate}>Later</button>
+                <button className="settings-btn primary" onClick={handleDownloadUpdate} disabled={updateBusy}>Update Now</button>
               </div>
             )}
           </div>
