@@ -29,6 +29,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // Gives the frontend a real "Restart App" action after an
+        // in-app update install (see updater.rs) instead of asking the
+        // user to find NexPass again in their app drawer.
+        .plugin(tauri_plugin_process::init())
+        // Real Tauri plugin (Kotlin @TauriPlugin) that installs a
+        // downloaded update APK — see tauri-plugin-nexpass-installer.
+        .plugin(tauri_plugin_nexpass_installer::init())
         .manage(Session::default());
 
     // Biometric prompt (fingerprint / face) — Android + iOS only, no
@@ -151,7 +158,9 @@ pub fn run() {
             check_for_update,
             fetch_release_notes,
             download_update,
-            delete_downloaded_apk,
+            get_downloaded_update_info,
+            delete_downloaded_update,
+            install_update_apk,
             get_profile,
             save_profile,
             set_profile_avatar,
@@ -553,14 +562,40 @@ fn fetch_release_notes() -> Result<Vec<updater::ReleaseNote>, String> {
     updater::fetch_release_notes()
 }
 
+// async + spawn_blocking for the same reason sync_now/backup_to_cloud/etc.
+// are — a multi-megabyte APK download run as a plain sync command would
+// occupy one of the async-runtime's worker threads for the whole
+// download; spawn_blocking moves it to the dedicated blocking pool
+// instead so it can't starve other in-flight commands.
 #[tauri::command]
-fn download_update(app: AppHandle, url: String) -> Result<String, String> {
-    updater::download_update(&app, &url)
+async fn download_update(app: AppHandle, url: String, version: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || updater::download_update(&app, &url, &version))
+        .await
+        .map_err(|e| format!("download task panicked: {e}"))?
 }
 
 #[tauri::command]
-fn delete_downloaded_apk(app: AppHandle) -> Result<bool, String> {
-    updater::delete_downloaded_apk(&app)
+fn get_downloaded_update_info(app: AppHandle) -> Result<Option<updater::DownloadedUpdateInfo>, String> {
+    updater::get_downloaded_update_info(&app)
+}
+
+#[tauri::command]
+fn delete_downloaded_update(app: AppHandle) -> Result<bool, String> {
+    updater::delete_downloaded_update(&app)
+}
+
+// See the tauri-plugin-nexpass-installer crate — this goes through a real
+// Tauri mobile plugin (Kotlin @TauriPlugin + FileProvider) instead of
+// either the opener plugin (can't reach files in NexPass's own private
+// storage on Android) or raw JNI (Tauri never initializes the ndk-context
+// global in this Tauri version, so calling it directly crashes the app).
+#[tauri::command]
+fn install_update_apk(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_nexpass_installer::NexpassInstallerExt;
+    app.nexpass_installer()
+        .install_apk(tauri_plugin_nexpass_installer::InstallApkRequest { path })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

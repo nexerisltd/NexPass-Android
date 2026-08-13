@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { authenticate as biometricAuthenticate, checkStatus as biometricCheckStatus } from "@tauri-apps/plugin-biometric";
-import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { save as saveFileDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
 const BACK_EXIT_WINDOW_MS = 2000;
@@ -144,6 +145,27 @@ interface UpdateInfo {
   version: string;
   changelog: string;
   download_url: string;
+}
+
+interface DownloadProgressEvent {
+  downloaded: number;
+  total: number;
+  phase: "downloading" | "done" | "error";
+  message: string;
+}
+
+interface DownloadedUpdateInfo {
+  version: string;
+  size_bytes: number;
+  downloaded_at: number; // unix seconds
+  path: string;
+}
+
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return "0 MB";
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
 const CATEGORIES: { id: string; label: string }[] = [
@@ -516,9 +538,13 @@ function App() {
   const [dailySync, setDailySync] = useState<DailySyncPref>(loadDailySyncPref);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateStage, setUpdateStage] = useState<"idle" | "downloading" | "ready" | "launching">("idle");
-  const [downloadProgress, setDownloadProgress] = useState<{ downloaded: number; total: number } | null>(null);
-  const [downloadedApkPath, setDownloadedApkPath] = useState<string | null>(null);
+  const [updateStage, setUpdateStage] = useState<"idle" | "downloading" | "downloaded" | "installing">("idle");
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressEvent | null>(null);
+  const [downloadedApk, setDownloadedApk] = useState<DownloadedUpdateInfo | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [deleteApkBusy, setDeleteApkBusy] = useState(false);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const [profile, setProfile] = useState<Profile>({ name: null, bio: null, avatar_path: null });
   const [profileNameDraft, setProfileNameDraft] = useState("");
   const [profileBioDraft, setProfileBioDraft] = useState("");
@@ -586,7 +612,20 @@ function App() {
     invoke<Profile>("get_profile").then(setProfile).catch(() => {});
     loadAll();
     maybeCheckForUpdate();
+    // Restores the Install/Delete controls if an update APK is already
+    // sitting on disk from a previous session (e.g. downloaded, then the
+    // app was closed before installing).
+    invoke<DownloadedUpdateInfo | null>("get_downloaded_update_info").then(setDownloadedApk).catch(() => {});
   }, [screen]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<DownloadProgressEvent>("update-download-progress", (event) => {
+      setDownloadProgress(event.payload);
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -615,15 +654,6 @@ function App() {
       if (event.payload.phase === "done" || event.payload.phase === "error") {
         setTimeout(() => setSyncProgress(null), 1200);
       }
-    });
-    return () => {
-      unlistenPromise.then((unlisten) => unlisten());
-    };
-  }, []);
-
-  useEffect(() => {
-    const unlistenPromise = listen<{ downloaded: number; total: number }>("update-download-progress", (event) => {
-      setDownloadProgress(event.payload);
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -827,6 +857,11 @@ function App() {
       const dismissed = localStorage.getItem(UPDATE_DISMISS_KEY);
       if (dismissed === info.version && !force) return; // already said "later" for this exact version
       setUpdateInfo(info);
+      // If this exact version's APK is already downloaded (e.g. from a
+      // previous session), skip straight to offering Install instead of
+      // making the user download it again.
+      setUpdateStage(downloadedApk && downloadedApk.version === info.version ? "downloaded" : "idle");
+      setDownloadProgress(null);
     } catch (e) {
       if (force) showToast(friendlyError(String(e)), "error", 4000);
       // Otherwise silent — an automatic background check failing (no
@@ -837,6 +872,8 @@ function App() {
   function dismissUpdate() {
     if (updateInfo) localStorage.setItem(UPDATE_DISMISS_KEY, updateInfo.version);
     setUpdateInfo(null);
+    setUpdateStage("idle");
+    setDownloadProgress(null);
   }
 
   function lastUpdateApplied(): { version: string; appliedAt: number } | null {
@@ -862,15 +899,20 @@ function App() {
     }
   }
 
+  // Step 1: download the APK into the app's internal storage, reporting
+  // progress via the "update-download-progress" event (see downloadProgress
+  // state). Leaves the APK on disk and switches to the "downloaded" stage
+  // instead of auto-installing — the person taps Install separately.
   async function handleDownloadUpdate() {
     if (!updateInfo) return;
     setUpdateBusy(true);
     setUpdateStage("downloading");
-    setDownloadProgress({ downloaded: 0, total: 0 });
+    setDownloadProgress(null);
     try {
-      const localPath = await invoke<string>("download_update", { url: updateInfo.download_url });
-      setDownloadedApkPath(localPath);
-      setUpdateStage("ready");
+      await invoke<string>("download_update", { url: updateInfo.download_url, version: updateInfo.version });
+      const info = await invoke<DownloadedUpdateInfo | null>("get_downloaded_update_info");
+      setDownloadedApk(info);
+      setUpdateStage("downloaded");
     } catch (e) {
       showToast(friendlyError(String(e)), "error", 4000);
       setUpdateStage("idle");
@@ -879,33 +921,55 @@ function App() {
     }
   }
 
-  function handleRunInstall() {
-    if (!downloadedApkPath || !updateInfo) return;
-    setUpdateStage("launching");
-    localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: updateInfo.version, appliedAt: Date.now() }));
-    // Hands the downloaded APK to Android's own package installer. If
-    // this app isn't yet allowed to install unknown apps, Android shows
-    // its own "Allow from this source" permission screen as part of the
-    // same flow — that's OS-level and outside anything we control.
-    // Fire-and-forget: the install intent can hand focus to the OS
-    // installer without ever resolving this promise, so we don't block
-    // the UI waiting on it.
-    openPath(downloadedApkPath).catch(() => {});
-    setUpdateInfo(null);
-    setUpdateStage("idle");
-    setDownloadProgress(null);
-    // After a successful install, Android's own installer screen offers
-    // an "Open" button to relaunch — that's as close to an automatic
-    // restart as a sideloaded app gets; we can't force it from here.
+  // Step 2: hand the already-downloaded APK to Android's own package
+  // installer (see installer.rs — this goes through a FileProvider
+  // content:// URI, not a raw path, or the installer can't read a file
+  // that lives in NexPass's own private storage). If NexPass doesn't yet
+  // have permission to install from this source, Android's installer
+  // screen itself asks for it (a Settings shortcut) — tapping Install
+  // again afterwards completes it.
+  async function handleInstallDownloadedApk() {
+    if (!downloadedApk) return;
+    setInstallBusy(true);
+    setUpdateStage("installing");
+    try {
+      localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: downloadedApk.version, appliedAt: Date.now() }));
+      await invoke("install_update_apk", { path: downloadedApk.path });
+      setUpdateInfo(null);
+      setShowRestartPrompt(true);
+    } catch (e) {
+      showToast(friendlyError(String(e)), "error", 4000);
+    } finally {
+      setInstallBusy(false);
+    }
   }
 
+  // Lets the user reclaim storage from a downloaded-but-not-yet-installed
+  // (or already-installed) update APK.
   async function handleDeleteDownloadedApk() {
+    setDeleteApkBusy(true);
     try {
-      const deleted = await invoke<boolean>("delete_downloaded_apk");
-      setDownloadedApkPath(null);
-      showToast(deleted ? "Downloaded update file deleted" : "No downloaded update file to delete", "success");
+      const removed = await invoke<boolean>("delete_downloaded_update");
+      if (removed) showToast("Update file deleted — storage freed", "success");
+      setDownloadedApk(null);
+      setUpdateStage((s) => (s === "downloaded" ? "idle" : s));
     } catch (e) {
       showToast(friendlyError(String(e)), "error");
+    } finally {
+      setDeleteApkBusy(false);
+    }
+  }
+
+  // After the OS finishes installing the new APK, the running process is
+  // normally the one being replaced — reopening cleanly is the reliable
+  // way back in, which is what this triggers.
+  async function handleRestartApp() {
+    setRestartBusy(true);
+    try {
+      await relaunch();
+    } catch (e) {
+      showToast(friendlyError(String(e)), "error");
+      setRestartBusy(false);
     }
   }
 
@@ -2105,18 +2169,49 @@ function App() {
                       {updateInfo && (
                         <div className="settings-row column">
                           <div className="settings-row-title">Update available — v{updateInfo.version}</div>
-                          <button className="settings-btn primary" onClick={() => { if (updateStage === "ready") handleRunInstall(); else handleDownloadUpdate(); }} disabled={updateBusy}>
-                            {updateStage === "downloading" ? "Downloading…" : updateStage === "ready" ? "Install" : "Update Now"}
-                          </button>
+                          {updateStage === "downloading" && (
+                            <div className="sync-progress">
+                              <div className="sync-progress-bar">
+                                <div
+                                  className="sync-progress-fill"
+                                  style={{
+                                    width:
+                                      downloadProgress && downloadProgress.total > 0
+                                        ? `${Math.min(100, (downloadProgress.downloaded / downloadProgress.total) * 100)}%`
+                                        : "100%",
+                                  }}
+                                />
+                              </div>
+                              <span className="settings-row-sub">
+                                {downloadProgress && downloadProgress.total > 0
+                                  ? `Downloading… ${formatBytes(downloadProgress.downloaded)} / ${formatBytes(downloadProgress.total)}`
+                                  : "Downloading…"}
+                              </span>
+                            </div>
+                          )}
+                          {updateStage === "idle" && (
+                            <button className="settings-btn primary" onClick={handleDownloadUpdate} disabled={updateBusy}>
+                              Download Update
+                            </button>
+                          )}
                         </div>
                       )}
-                      <div className="settings-row">
-                        <div>
-                          <div className="settings-row-title">Downloaded update file</div>
-                          <div className="settings-row-sub">Free up storage after installing.</div>
+                      {downloadedApk && (
+                        <div className="settings-row column">
+                          <div className="settings-row-title">Downloaded update — v{downloadedApk.version}</div>
+                          <div className="settings-row-sub">{formatBytes(downloadedApk.size_bytes)} on this device, not encrypted</div>
+                          <div className="settings-btn-group">
+                            {updateStage !== "downloading" && (
+                              <button className="settings-btn primary" onClick={handleInstallDownloadedApk} disabled={installBusy}>
+                                {installBusy ? "Opening installer…" : "Install Now"}
+                              </button>
+                            )}
+                            <button className="settings-btn danger" onClick={handleDeleteDownloadedApk} disabled={deleteApkBusy}>
+                              {deleteApkBusy ? "Deleting…" : "Delete APK File"}
+                            </button>
+                          </div>
                         </div>
-                        <button className="settings-btn" onClick={handleDeleteDownloadedApk}>Delete APK file</button>
-                      </div>
+                      )}
                     </div>
                   </div>
                 </>
@@ -2564,34 +2659,58 @@ function App() {
             <p className="update-changelog">{updateInfo.changelog}</p>
 
             {updateStage === "downloading" && (
-              <div className="update-progress-block">
+              <div className="sync-progress">
                 <div className="sync-progress-bar">
                   <div
                     className="sync-progress-fill"
-                    style={{ width: downloadProgress && downloadProgress.total > 0 ? `${Math.min(100, (downloadProgress.downloaded / downloadProgress.total) * 100)}%` : "8%" }}
+                    style={{
+                      width:
+                        downloadProgress && downloadProgress.total > 0
+                          ? `${Math.min(100, (downloadProgress.downloaded / downloadProgress.total) * 100)}%`
+                          : "100%",
+                    }}
                   />
                 </div>
-                <p className="status-text">
+                <span className="settings-row-sub">
                   {downloadProgress && downloadProgress.total > 0
-                    ? `Downloading… ${Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}% (${(downloadProgress.downloaded / 1048576).toFixed(1)} / ${(downloadProgress.total / 1048576).toFixed(1)} MB)`
+                    ? `${formatBytes(downloadProgress.downloaded)} / ${formatBytes(downloadProgress.total)}`
                     : "Downloading…"}
-                </p>
+                </span>
               </div>
             )}
 
-            {updateStage === "ready" && (
+            {updateStage === "downloaded" && (
               <div className="settings-btn-group">
                 <button className="settings-btn" onClick={dismissUpdate}>Later</button>
-                <button className="settings-btn primary" onClick={handleRunInstall}>Install</button>
+                <button className="settings-btn primary" onClick={handleInstallDownloadedApk} disabled={installBusy}>
+                  {installBusy ? "Opening installer…" : "Install Now"}
+                </button>
               </div>
             )}
 
             {updateStage === "idle" && (
               <div className="settings-btn-group">
                 <button className="settings-btn" onClick={dismissUpdate}>Later</button>
-                <button className="settings-btn primary" onClick={handleDownloadUpdate} disabled={updateBusy}>Update Now</button>
+                <button className="settings-btn primary" onClick={handleDownloadUpdate} disabled={updateBusy}>Download Update</button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {showRestartPrompt && !updateInfo && (
+        <div className="confirm-overlay" onClick={() => setShowRestartPrompt(false)}>
+          <div className="confirm-box update-box" onClick={(e) => e.stopPropagation()}>
+            <div className="update-icon"><Icon.download /></div>
+            <p className="update-changelog">
+              Android's installer is opening in the background. Once you confirm the install there, tap below to restart NexPass. (If it doesn't reopen on its own, just launch NexPass again from your home screen.)
+            </p>
+            <div className="settings-btn-group">
+              <button className="settings-btn" onClick={() => setShowRestartPrompt(false)}>Not now</button>
+              <button className="settings-btn primary" onClick={handleRestartApp} disabled={restartBusy}>
+                {restartBusy ? "Restarting…" : "Restart App"}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -53,6 +53,9 @@ jobs:
       - name: Patch build.gradle.kts for release signing
         run: python3 .github/scripts/patch_gradle.py
 
+      - name: Patch Android project for in-app APK install
+        run: python3 .github/scripts/patch_android_installer.py
+
       - name: Write keystore.properties
         run: |
           cat > src-tauri/gen/android/keystore.properties << PROPS

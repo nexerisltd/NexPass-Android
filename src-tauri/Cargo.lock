@@ -2261,7 +2261,9 @@ dependencies = [
  "tauri-plugin-biometric",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
+ "tauri-plugin-nexpass-installer",
  "tauri-plugin-opener",
+ "tauri-plugin-process",
  "urlencoding",
  "uuid",
  "window-vibrancy 0.5.3",
@@ -4091,6 +4093,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-nexpass-installer"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
+ "tauri-plugin-opener",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "tauri-plugin-opener"
 version = "2.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4110,6 +4123,16 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-process"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

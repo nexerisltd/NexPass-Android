@@ -8,6 +8,8 @@
     "opener:default",
     "dialog:default",
     "fs:allow-write-text-file",
-    "fs:allow-read-text-file"
+    "fs:allow-read-text-file",
+    "process:allow-restart",
+    "nexpass-installer:default"
   ]
 }
