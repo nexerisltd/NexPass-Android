@@ -2246,7 +2246,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexpass"
-version = "5.0.5"
+version = "6.0.1"
 dependencies = [
  "aes-gcm",
  "argon2",

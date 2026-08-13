@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-const CURRENT_VERSION: &str = "5.0.5";
+const CURRENT_VERSION: &str = "6.0.1";
 const HTTP_TIMEOUT_SECS: u64 = 15;
 
 // Replace with wherever you end up hosting update.json (a GitHub raw
