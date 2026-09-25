@@ -10,6 +10,7 @@
     "fs:allow-write-text-file",
     "fs:allow-read-text-file",
     "process:allow-restart",
+    "deep-link:default",
     "nexpass-installer:default"
   ]
 }

@@ -1,74 +1,70 @@
 # NexPass
 
-v4 · NexApp · Developed by Arabi Islam, MR. ARX
+v7.0.1 · NexApp · Developed by Arabi Islam, MR. ARX
 
-A desktop credential vault built with Tauri (Rust) + React. v1 scaffold:
-local-only vault with PIN unlock. Cloud sync and browser autofill are
-planned for later versions.
+A secure Android credential vault built with Tauri (Rust) + React.
+Local-only encrypted vault with mandatory Google sign-in + PIN unlock,
+optional Firestore cloud sync, and offline-friendly credential icons.
+(Desktop lives in its own separate repo now.)
 
-## Before you run this
+## Before you build this
 
-1. **Icon**: a placeholder icon is included at `src-tauri/icons/` and
-   `public/assets/icon.png`. Replace both with your real logo — for the
-   `src-tauri/icons/` set, run:
+1. **Secrets**: copy `src-tauri/src/secrets.rs.example` to
+   `src-tauri/src/secrets.rs` (git-ignored, never commit it) and fill
+   in your Firebase Web API key. The Android OAuth client ID is
+   already filled in. If you build via CI instead, set the
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (can be blank — Android
+   clients don't have one; only the old desktop flow reads it), and
+   `FIREBASE_API_KEY` GitHub Secrets — see `.github/workflows/`.
+2. **Google Cloud Console**: the OAuth client must be an **Android**
+   application type, registered with this app's package name
+   (`com.nexapp.nexpass`) and your release keystore's SHA-1
+   fingerprint. See `src-tauri/src/google_auth.rs` for why this
+   matters (Android-type clients use a fixed custom-scheme redirect +
+   PKCE, not the old loopback-server flow).
+3. **Icon**: `src-tauri/icons/icon.png` and `public/assets/icon.png`
+   already have the new logo. To regenerate every platform-specific
+   size after changing it, run:
    ```
    npm install -g @tauri-apps/cli
-   tauri icon path/to/your/icon.png
+   tauri icon src-tauri/icons/icon.png
    ```
-   This regenerates all platform-specific sizes automatically.
-
-2. **Prerequisites**: Node.js 18+, and Rust (via `rustup`). Tauri also
-   needs platform build tools — see
-   https://v2.tauri.app/start/prerequisites/ for your OS.
+4. **Prerequisites**: Node.js 18+, Rust (via `rustup`), and the
+   Android SDK/NDK — see https://v2.tauri.app/start/prerequisites/.
 
 ## Getting it running
 
 ```bash
 npm install
-npm run tauri dev
+npx tauri android init
+npx tauri android dev
 ```
 
-First run: you'll be asked to create a 6-digit PIN (entered twice to
-confirm). After that, the app will always ask for that PIN to unlock.
+First run on a fresh device: you'll be asked to sign in with Google
+before anything else, then set a 6-digit PIN. After that, NexPass only
+ever asks for the PIN — fully offline-capable — until you log out.
 
 ## What's here vs. what's next
 
-- ✅ Project shell: Vite + React + TypeScript frontend, Tauri + Rust backend
-- ✅ Branding: app name, version, identifier, window config, placeholder icon
+- ✅ Mandatory Google sign-in on first setup, PIN tied to the account
+  (a second device signing into the same account is required to enter
+  that account's existing PIN, not create a new disconnected vault)
 - ✅ Crypto module (`src-tauri/src/crypto.rs`): Argon2id key derivation + AES-256-GCM encrypt/decrypt
-- ✅ Storage module (`src-tauri/src/storage.rs`): saves/loads vault metadata locally
-- ✅ PIN unlock screen: first-run setup + returning-user unlock, with a shake animation on wrong PIN
-- ✅ Release build tuned for a smaller, faster binary (LTO, stripped symbols)
-- ✅ Google Sign-In (`src-tauri/src/google_auth.rs`): opens the system browser, catches the redirect on a local loopback server, exchanges tokens with Google then Firebase Auth
-- ✅ Firestore sync (`src-tauri/src/sync.rs`): push/pull already-encrypted entries, last-write-wins by timestamp
-- ✅ Redesigned UI: search bar, two-pane list + detail layout, favicon-style avatars (falls back to an initial-letter avatar when a site has no favicon), copy/edit/delete icons, toast feedback, smooth hover states
-- ⬜ Sidebar categories (Favorites, Cards, Secure Notes, Identities, Trash) — not built yet, only "All items" exists for now
+- ✅ Storage module (`src-tauri/src/storage.rs`) + SQLite vault (`vault.rs`)
+- ✅ Firestore sync (`src-tauri/src/sync.rs`): batched push/pull, smart-sync change detection
+- ✅ Offline-cached credential icons (`favicon_cache.rs`)
+- ✅ Biometric unlock, in-app update check/download/install, data export/import
+- ⬜ Sidebar categories beyond the current grid — only flat category filtering exists
 - ⬜ Browser autofill extension — later version
 
-## Note on the current UI
+See `CHANGES_v7.0.1.md` for the full list of what changed in this
+release and what to test before shipping it.
 
-The list+detail layout, search, and favicon avatars are built and working.
-Category sidebar items, a security-strength meter, and premium upsell —
-if you want any of those from your reference design — aren't implemented;
-say the word and they can be added next.
+## Where the vault data lives
 
-## ⚠️ Security note on `google_auth.rs`
-
-The Google OAuth Client ID/Secret and Firebase Web API key are hardcoded
-in `src-tauri/src/google_auth.rs` for now, to get sign-in working
-quickly. Before you publish this repo anywhere public (GitHub, etc.) or
-ship a release build:
-- Move these three values out of source into a build-time config or
-  `.env` file that's git-ignored.
-- The Client ID/API key aren't secret by nature (they're visible in any
-  compiled binary regardless), but keeping them out of version control
-  is still good practice — and if you ever rotate the Client Secret,
-  you won't have to hunt through git history.
-
-## Where the PIN and vault data live
-
-`vault_meta.json` is saved in the OS app-data directory (Tauri resolves
-this automatically per platform — e.g.
-`%APPDATA%/com.nexapp.nexpass/` on Windows). It contains only a salt
-and a verification hash — never the PIN itself, and never the
-encryption key.
+Everything is under the OS app-data directory (Android:
+`/data/data/com.nexapp.nexpass/files/`, not directly accessible without
+root): `vault_meta.json` (PIN salt + verification hash only — never the
+PIN or the encryption key), `vault.sqlite3` (all fields AES-256-GCM
+encrypted, keyed by the PIN-derived key), `google_session.json`,
+`sync_meta.json`, `favicon_cache/`, `settings.json`, `profile.json`.

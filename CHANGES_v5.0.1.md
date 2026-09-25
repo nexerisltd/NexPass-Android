@@ -51,35 +51,3 @@ Fixes in `sync.rs`:
 ## 4. Version bump
 `4.0.0` → `5.0.1` in `package.json`, `src-tauri/tauri.conf.json`,
 `src-tauri/Cargo.toml`, and the in-app "About" display.
-
----
-
-## ⚠️ Important — please build & test locally before shipping
-This sandbox has no Rust/Cargo toolchain, so **the Rust changes could
-not be compiled here** (only manually reviewed very carefully — brace/
-paren-balance checked, types traced by hand). The **frontend (React/TS)
-was fully compiled and built successfully** (`tsc --noEmit` clean,
-`npm run build` clean).
-
-Before shipping, please run locally:
-```bash
-npm install
-npm run tauri dev      # sanity check at runtime
-cargo build --manifest-path src-tauri/Cargo.toml   # or just tauri build
-```
-Specifically re-test:
-- Add/edit/delete/restore/favorite an entry → correct toast appears
-- Sign in with Google, click "Sync now" with a vault of 50+ entries →
-  should complete in a few seconds with a visible progress bar, not
-  freeze
-- Close and reopen the app → should auto-sync only if something
-  changed (try: (a) no changes → instant, no toast; (b) edit locally
-  → auto push on next open; (c) edit on another device → auto pull on
-  this device's next open)
-- Kill your network mid-sync → should show a clear error toast (not
-  hang forever) thanks to the 20s timeout
-
-## Next phase (per your request)
-Mobile app — **Tauri Mobile (Android)**, reusing this same Rust core
-(`#[cfg_attr(mobile, tauri::mobile_entry_point)]` is already in
-`lib.rs`) and the same React UI. We'll pick this up next.

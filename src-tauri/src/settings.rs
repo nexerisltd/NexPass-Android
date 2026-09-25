@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
+    #[serde(default)]
     pub minimize_to_tray: bool,
     pub notifications_enabled: bool,
     pub auto_lock_minutes: i64,
@@ -23,7 +24,7 @@ fn default_update_frequency() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
-            minimize_to_tray: true,
+            minimize_to_tray: false,
             notifications_enabled: true,
             auto_lock_minutes: 5,
             biometric_enabled: false,

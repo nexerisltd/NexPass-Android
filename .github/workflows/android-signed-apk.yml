@@ -1,5 +1,12 @@
 name: Android signed APK build
 
+# NOTE (v7.0.1): this workflow previously skipped `tauri android init`
+# and the two .github/scripts patch steps entirely, and wrote secrets
+# to a `.env` file that nothing in the Rust code actually reads (the
+# app expects a real src-tauri/src/secrets.rs module — see
+# secrets.rs.example). Both bugs are fixed below; this workflow now
+# mirrors build-android.yml's (already-correct) sequence.
+
 on:
   push:
     branches:
@@ -28,6 +35,10 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
       - name: Install Android SDK components
         env:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -37,27 +48,45 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Write build-time environment file
+      - name: Write secrets.rs
         run: |
-          mkdir -p src-tauri
-          cat > src-tauri/.env <<'EOF'
-          GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
-          FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
-          EOF
+          mkdir -p src-tauri/src
+          cat > src-tauri/src/secrets.rs << SECRETS
+          pub const GOOGLE_CLIENT_ID: &str = "${{ secrets.GOOGLE_CLIENT_ID }}";
+          pub const GOOGLE_CLIENT_SECRET: &str = "${{ secrets.GOOGLE_CLIENT_SECRET }}";
+          pub const FIREBASE_API_KEY: &str = "${{ secrets.FIREBASE_API_KEY }}";
+          SECRETS
 
-      - name: Write Android signing files
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/nexpass-release.jks
+
+      - name: Init Android project
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: npx tauri android init
+
+      - name: Patch build.gradle.kts for release signing
+        run: python3 .github/scripts/patch_gradle.py
+
+      - name: Patch Android project for in-app APK install
+        run: python3 .github/scripts/patch_android_installer.py
+
+      - name: Write keystore.properties
         run: |
-          mkdir -p src-tauri/gen/android
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > src-tauri/gen/android/nexpass-release.jks
-          cat > src-tauri/gen/android/keystore.properties <<'EOF'
-          storeFile=nexpass-release.jks
+          cat > src-tauri/gen/android/keystore.properties << PROPS
+          storeFile=../../../nexpass-release.jks
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}EOF
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          PROPS
 
       - name: Build signed APK
         env:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
           JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
         run: npx tauri android build --apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexpass-signed-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk

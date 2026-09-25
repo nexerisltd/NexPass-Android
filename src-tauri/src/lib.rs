@@ -1,6 +1,7 @@
 // NexPass — Tauri backend library
 mod biometric_store;
 mod crypto;
+mod favicon_cache;
 mod google_auth;
 mod profile_store;
 mod secrets;
@@ -11,10 +12,6 @@ mod updater;
 mod vault;
 
 use std::sync::Mutex;
-#[cfg(desktop)]
-use tauri::menu::{Menu, MenuItem};
-#[cfg(desktop)]
-use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 #[derive(Default)]
@@ -25,7 +22,7 @@ type Session = Mutex<SessionState>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -36,90 +33,40 @@ pub fn run() {
         // Real Tauri plugin (Kotlin @TauriPlugin) that installs a
         // downloaded update APK — see tauri-plugin-nexpass-installer.
         .plugin(tauri_plugin_nexpass_installer::init())
-        .manage(Session::default());
-
-    // Biometric prompt (fingerprint / face) — Android + iOS only, no
-    // desktop equivalent, so the plugin isn't even a dependency there.
-    #[cfg(mobile)]
-    {
-        builder = builder.plugin(tauri_plugin_biometric::init());
-    }
-
-    builder
+        // Catches the Google sign-in redirect (see google_auth.rs's
+        // Android flow) as a deep link instead of a loopback HTTP
+        // server — that's what lets sign-in work reliably across
+        // phone browsers that won't hand control back to a raw
+        // http://127.0.0.1 URL.
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_biometric::init())
+        .manage(Session::default())
         .setup(|app| {
-            // Tray icons don't exist on Android/iOS — this whole block
-            // (and the imports above) only compiles in on desktop.
-            #[cfg(desktop)]
-            {
-                let show_item = MenuItem::with_id(app, "show", "Show NexPass", true, None::<&str>)?;
-                let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
-                let mut tray = TrayIconBuilder::new().menu(&menu).on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "show" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
-                        }
-                        "quit" => app.exit(0),
-                        _ => {}
-                    }
-                });
-                if let Some(icon) = app.default_window_icon() {
-                    tray = tray.icon(icon.clone());
+            // Wire the deep-link plugin straight into google_auth's
+            // pending-sign-in channel — this fires whenever Android
+            // hands NexPass a `com.googleusercontent.apps.<id>:/...`
+            // redirect URL, whether or not a sign-in is actually
+            // waiting (handle_redirect_url no-ops if nothing's pending).
+            use tauri_plugin_deep_link::DeepLinkExt;
+            app.deep_link().on_open_url(|event| {
+                for url in event.urls() {
+                    google_auth::handle_redirect_url(url.as_str());
                 }
-                tray.build(app)?;
-            }
-
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
-                {
-                    use window_vibrancy::{apply_acrylic, apply_mica};
-                    if apply_mica(&window, Some(true)).is_err() {
-                        let _ = apply_acrylic(&window, Some((10, 10, 20, 125)));
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                    let _ = apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None);
-                }
-            }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
+            // On Android, the hardware/gesture back button surfaces here
+            // when the WebView has no in-page history left to pop. Hand
+            // it to the frontend instead of letting the OS kill the
+            // activity outright, so it can step back a level inside the
+            // app, or show a "press back again to exit" prompt at the
+            // root and only actually quit (via the exit_app command)
+            // on a genuine second press.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
-
-                #[cfg(desktop)]
-                {
-                    let s = settings::load_settings(app);
-                    if s.minimize_to_tray {
-                        api.prevent_close();
-                        let _ = window.hide();
-                        if let Some(session) = app.try_state::<Session>() {
-                            if let Ok(mut guard) = session.lock() {
-                                guard.key = None;
-                            }
-                        }
-                        return;
-                    }
-                }
-
-                // On Android, the hardware/gesture back button surfaces here
-                // when the WebView has no in-page history left to pop. Hand
-                // it to the frontend instead of letting the OS kill the
-                // activity outright, so it can step back a level inside the
-                // app, or show a "press back again to exit" prompt at the
-                // root and only actually quit (via the exit_app command)
-                // on a genuine second press.
-                #[cfg(mobile)]
-                {
-                    api.prevent_close();
-                    let _ = app.emit("back-requested", ());
-                }
+                api.prevent_close();
+                let _ = app.emit("back-requested", ());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -164,7 +111,8 @@ pub fn run() {
             get_profile,
             save_profile,
             set_profile_avatar,
-            clear_profile_avatar
+            clear_profile_avatar,
+            get_cached_favicon
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexPass");
@@ -190,7 +138,13 @@ fn setup_pin(app: AppHandle, session: State<Session>, pin: String) -> Result<(),
     // material instead of generating a new one — otherwise this
     // device would derive a different AES key from the same PIN and
     // would never be able to decrypt entries from other devices on
-    // the same account (or vice versa).
+    // the same account (or vice versa). This is also what makes the
+    // mandatory-sign-in-before-PIN flow (see App.tsx) do the right
+    // thing automatically: a brand-new account falls through to
+    // "create fresh" below, while an account that already has a vault
+    // elsewhere is REQUIRED to enter that account's real PIN here —
+    // get it wrong and this returns an error instead of silently
+    // starting a second, disconnected vault.
     if storage::load_google_session(&app)?.is_some() {
         if let Ok(Some(material)) = sync::fetch_cloud_key_material(&app) {
             let key = crypto::unlock(&pin, &material).map_err(|_| {
@@ -623,4 +577,13 @@ fn clear_profile_avatar(app: AppHandle) -> Result<(), String> {
     let mut p = profile_store::load(&app);
     p.avatar_path = None;
     profile_store::save(&app, &p)
+}
+
+/// Returns a local file path for a hostname's favicon, fetching and
+/// caching it first if needed (see favicon_cache.rs) — this is what
+/// lets credential icons keep showing up offline after the first
+/// successful load.
+#[tauri::command]
+fn get_cached_favicon(app: AppHandle, hostname: String) -> Result<favicon_cache::CachedIcon, String> {
+    favicon_cache::get_or_fetch(&app, &hostname)
 }

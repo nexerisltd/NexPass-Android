@@ -37,7 +37,7 @@ function friendlyError(raw: string): string {
 }
 
 const APP_NAME = "NexPass";
-const APP_VERSION = "5.0.5";
+const APP_VERSION = "7.0.1";
 const APP_ID = "068691";
 const APP_AUTHOR = "NexApp";
 const APP_AUTHOR_URL = "https://nexappog.vercel.app/";
@@ -56,7 +56,7 @@ const UPDATE_FREQUENCY_MS: Record<string, number> = {
   monthly: 30 * 24 * 60 * 60 * 1000,
 };
 
-type Screen = "loading" | "create-pin" | "confirm-pin" | "enter-pin" | "vault";
+type Screen = "loading" | "require-signin" | "create-pin" | "confirm-pin" | "enter-pin" | "vault";
 type PanelMode = "none" | "view" | "edit" | "add" | "profile" | "pick-category";
 type MainTab = "home" | "favorites" | "categories" | "settings";
 type SettingsScreen = "menu" | "general" | "account" | "about" | "trash" | "updates";
@@ -315,11 +315,6 @@ function hostnameOf(url: string): string | null {
   }
 }
 
-function faviconUrl(url: string): string | null {
-  const host = hostnameOf(url);
-  return host ? `https://www.google.com/s2/favicons?sz=64&domain=${host}` : null;
-}
-
 function normalizedUrl(url: string): string {
   if (!url.trim()) return "";
   return url.startsWith("http") ? url : `https://${url}`;
@@ -573,13 +568,26 @@ function App() {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [sensitiveRevealed, setSensitiveRevealed] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [brokenIcons, setBrokenIcons] = useState<Set<string>>(new Set());
-  function markIconBroken(url: string) {
-    setBrokenIcons((prev) => (prev.has(url) ? prev : new Set(prev).add(url)));
+  // Offline-friendly credential icons: resolved once per hostname via
+  // the Rust favicon cache (favicon_cache.rs) and kept as local file
+  // paths, so the list still shows real site icons with no network at
+  // all after the first successful fetch. A value of "" means "tried
+  // and failed" so we don't keep hammering a host that's unreachable.
+  const [iconCache, setIconCache] = useState<Record<string, string>>({});
+  const requestedHostsRef = useRef<Set<string>>(new Set());
+  function ensureIconsCached(items: { url: string }[]) {
+    for (const item of items) {
+      const host = hostnameOf(item.url);
+      if (!host || requestedHostsRef.current.has(host)) continue;
+      requestedHostsRef.current.add(host);
+      invoke<{ path: string; from_cache: boolean }>("get_cached_favicon", { hostname: host })
+        .then((res) => setIconCache((prev) => ({ ...prev, [host]: convertFileSrc(res.path) })))
+        .catch(() => setIconCache((prev) => ({ ...prev, [host]: "" })));
+    }
   }
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const [appSettings, setAppSettings] = useState({ minimize_to_tray: true, notifications_enabled: true, auto_lock_minutes: 5, biometric_enabled: false, update_check_frequency: "weekly" });
+  const [appSettings, setAppSettings] = useState({ minimize_to_tray: false, notifications_enabled: true, auto_lock_minutes: 5, biometric_enabled: false, update_check_frequency: "weekly" });
   const [biometricSetupPin, setBiometricSetupPin] = useState("");
   const [biometricSetupOpen, setBiometricSetupOpen] = useState(false);
   const [biometricBusy, setBiometricBusy] = useState(false);
@@ -596,8 +604,33 @@ function App() {
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    // First-run devices must sign in with Google before they're ever
+    // allowed onto the PIN screen — that's what lets the backend tell
+    // "brand-new account" (create a PIN) apart from "this account
+    // already has a vault on another device" (must enter THAT PIN
+    // instead — setup_pin already checks the account's cloud vault key
+    // and handles both cases; see lib.rs). A device that already has a
+    // local vault skips straight to the PIN pad exactly as before,
+    // fully offline — the mandatory sign-in only ever happens once, the
+    // very first time this device is set up.
     invoke<boolean>("vault_exists")
-      .then((exists) => setScreen(exists ? "enter-pin" : "create-pin"))
+      .then(async (exists) => {
+        if (exists) {
+          setScreen("enter-pin");
+          return;
+        }
+        try {
+          const session = await invoke<GoogleSession | null>("google_session_status");
+          if (session) {
+            setGoogleSession(session);
+            setScreen("create-pin");
+          } else {
+            setScreen("require-signin");
+          }
+        } catch {
+          setScreen("require-signin");
+        }
+      })
       .catch(() => setError("Could not reach the app backend."));
     // Fetched here (not gated behind screen === "vault") because the
     // biometric-unlock prompt needs to know biometric_enabled *before*
@@ -612,7 +645,7 @@ function App() {
     invoke<Profile>("get_profile").then(setProfile).catch(() => {});
     loadAll();
     maybeCheckForUpdate();
-    // Restores the Install/Delete controls if an update APK is already
+    // Restores the Install/Delete buttons if an update APK is already
     // sitting on disk from a previous session (e.g. downloaded, then the
     // app was closed before installing).
     invoke<DownloadedUpdateInfo | null>("get_downloaded_update_info").then(setDownloadedApk).catch(() => {});
@@ -776,6 +809,24 @@ function App() {
     }
   }
 
+  // First-run only: sign in, then move on to the PIN screen (which
+  // will transparently become "enter your existing PIN" instead of
+  // "create a PIN" if this Google account already has a vault
+  // elsewhere — setup_pin handles that check).
+  async function handleInitialSignIn() {
+    setSigningIn(true);
+    setError("");
+    try {
+      const s = await invoke<GoogleSession>("google_sign_in");
+      setGoogleSession(s);
+      setScreen("create-pin");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
   async function handleReconcileVaultKey() {
     if (reconcilePin.length < 4) {
       setReconcileError("Enter the PIN this account's vault was set up with.");
@@ -833,6 +884,18 @@ function App() {
     invoke<EntrySummary[]>("list_entries").then(setEntries).catch((e) => setEntriesError(String(e)));
     invoke<EntrySummary[]>("list_trash").then(setTrashEntries).catch(() => {});
   }
+
+  // Prefetch/offline-cache credential icons whenever the visible entry
+  // lists change, or a single entry is opened in detail.
+  useEffect(() => {
+    ensureIconsCached(entries);
+  }, [entries]);
+  useEffect(() => {
+    ensureIconsCached(trashEntries);
+  }, [trashEntries]);
+  useEffect(() => {
+    if (selectedEntry) ensureIconsCached([selectedEntry]);
+  }, [selectedEntry]);
 
   // Checked once per app-open, throttled to at most once/day (there's no
   // true background service on Android without native work-manager code,
@@ -1537,10 +1600,10 @@ function App() {
   const filteredFavorites = useMemo(() => applySearchAndSort(favoritesList), [favoritesList, search, sortMode]);
 
   const heading =
-    screen === "create-pin" ? "Create a PIN" : screen === "confirm-pin" ? "Confirm your PIN" : screen === "enter-pin" ? "Enter your PIN" : "";
+    screen === "create-pin" ? "Set your PIN" : screen === "confirm-pin" ? "Confirm your PIN" : screen === "enter-pin" ? "Enter your PIN" : "";
   const subheading =
     screen === "create-pin"
-      ? `Choose a ${PIN_LENGTH}-digit PIN to lock your vault`
+      ? `Choose a ${PIN_LENGTH}-digit PIN — if this account already has one set up on another device, enter that PIN instead`
       : screen === "confirm-pin"
       ? "Enter it again to confirm"
       : screen === "enter-pin"
@@ -1550,12 +1613,12 @@ function App() {
   const fullPageOpen = panelMode !== "none";
 
   function renderEntryRow(entry: EntrySummary, fromTrash: boolean) {
-    const iconUrl = faviconUrl(entry.url);
-    const icon = iconUrl && !brokenIcons.has(iconUrl) ? iconUrl : null;
+    const host = hostnameOf(entry.url);
+    const icon = host ? iconCache[host] || null : null;
     return (
       <li key={entry.id} className="entry-row" onClick={() => selectEntry(entry.id, fromTrash)}>
         <span className="avatar" style={{ background: icon ? "transparent" : avatarColor(entry.title) }}>
-          {icon ? <img src={icon} alt="" onError={() => markIconBroken(icon)} /> : entry.title.charAt(0).toUpperCase() || "?"}
+          {icon ? <img src={icon} alt="" /> : entry.title.charAt(0).toUpperCase() || "?"}
         </span>
         <span className="entry-row-text">
           <span className="entry-row-title">{entry.title}</span>
@@ -1588,10 +1651,23 @@ function App() {
 
   return (
     <div className="app-shell">
-      {(screen === "loading" || screen === "create-pin" || screen === "confirm-pin" || screen === "enter-pin") && (
+      {(screen === "loading" || screen === "require-signin" || screen === "create-pin" || screen === "confirm-pin" || screen === "enter-pin") && (
         <div className="centered-content full-bleed">
           {screen === "loading" && <p className="status-text">Loading…</p>}
-          {screen !== "loading" && (
+          {screen === "require-signin" && (
+            <div className="pin-screen">
+              <img src={LOGO_SRC} alt="" className="pin-logo" />
+              <h2>Welcome to NexPass</h2>
+              <p className="status-text">
+                Sign in with Google to set up your vault. You'll only need to do this once — after that, NexPass unlocks with just your PIN, online or off.
+              </p>
+              <button className="new-item-btn signin-banner-btn" style={{ marginTop: 18 }} onClick={handleInitialSignIn} disabled={signingIn}>
+                {signingIn ? "Waiting…" : "Sign in with Google"}
+              </button>
+              {error && <p className="error-text" style={{ marginTop: 12 }}>{friendlyError(error)}</p>}
+            </div>
+          )}
+          {(screen === "create-pin" || screen === "confirm-pin" || screen === "enter-pin") && (
             <div className="pin-screen">
               <img src={LOGO_SRC} alt="" className="pin-logo" />
               <h2>{heading}</h2>
@@ -2286,12 +2362,12 @@ function App() {
               <div className="list-scroll detail-content">
                 <div className="detail-avatar-block">
                   {(() => {
-                    const detailIconUrl = faviconUrl(selectedEntry.url);
-                    const detailIcon = detailIconUrl && !brokenIcons.has(detailIconUrl) ? detailIconUrl : null;
+                    const detailHost = hostnameOf(selectedEntry.url);
+                    const detailIcon = detailHost ? iconCache[detailHost] || null : null;
                     return (
                       <span className="avatar large" style={{ background: detailIcon ? "transparent" : avatarColor(selectedEntry.title) }}>
                         {detailIcon ? (
-                          <img src={detailIcon} alt="" onError={() => markIconBroken(detailIcon)} />
+                          <img src={detailIcon} alt="" />
                         ) : (
                           selectedEntry.title.charAt(0).toUpperCase() || "?"
                         )}

@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "625887113006",
+    "project_id": "nexpass-9bfe3",
+    "storage_bucket": "nexpass-9bfe3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:625887113006:android:061a20f793b1fb8f3b14bf",
+        "android_client_info": {
+          "package_name": "com.nexapp.nexpass"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "625887113006-c3h3he6s3f0qkmllql9bk68pnan6c3ic.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCDoqIX4uklIiFmOSZ7ERVaapSnYXmyY9c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "625887113006-c3h3he6s3f0qkmllql9bk68pnan6c3ic.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
