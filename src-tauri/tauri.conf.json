@@ -39,8 +39,7 @@
     "deep-link": {
       "mobile": [
         {
-          "scheme": "com.googleusercontent.apps.625887113006-1ltgg1u1dkec1vhehs5ut80fiurhk7de",
-          "host": "oauth2redirect"
+          "scheme": ["com.googleusercontent.apps.625887113006-1ltgg1u1dkec1vhehs5ut80fiurhk7de"]
         }
       ]
     }
